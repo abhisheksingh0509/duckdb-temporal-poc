@@ -1,0 +1,181 @@
+# Full local stack. `make up` is the only command you need.
+#
+#   postgres        Temporal persistence
+#   temporal        Temporal server (auto-setup creates the default namespace)
+#   temporal-ui     http://localhost:8234  -- the primary observability pane
+#   minio           S3-compatible object store: landing zone + Parquet lake
+#                   console http://localhost:9201 (minioadmin/minioadmin)
+#   worker-compute  workflows + stateless DuckDB   (queue duck-compute-tq)
+#                   scale freely: docker compose up -d --scale worker-compute=4
+#   worker-writer   warehouse.duckdb, one slot     (queue duck-writer-tq)
+#                   DO NOT scale this one -- see README section 4
+#
+# Host ports are offset off the defaults so this stack can run alongside the
+# other Temporal/MinIO projects in this repo folder.
+
+name: duckdb-temporal
+
+x-duck-env: &duck-env
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  LAKE_URI: s3://lake
+  S3_ENDPOINT: minio:9000
+  S3_USE_SSL: "0"
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  AWS_REGION: us-east-1
+  WAREHOUSE_PATH: /data/warehouse.duckdb
+  DUCKDB_TEMP_DIR: /data/duck-tmp
+  DUCKDB_EXTENSION_DIR: /opt/duckdb-extensions
+  LOG_JSON: "0"
+  LOG_LEVEL: INFO
+
+services:
+  # ---------------------------------------------------------------- storage
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9200:9000"   # S3 API
+      - "9201:9001"   # console: minioadmin / minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/lake &&
+      echo 'bucket ready: lake'
+      "
+    restart: "no"
+
+  # --------------------------------------------------------------- temporal
+  temporal:
+    image: temporalio/auto-setup:1.29.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "7234:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--address", "temporal:7233"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    depends_on:
+      temporal:
+        condition: service_started
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8234
+    ports:
+      - "8234:8080"
+
+  # ---------------------------------------------------------------- workers
+  worker-compute:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *duck-env
+      # 4, not 8: the widest phase in the DAG is the four parallel bronze steps,
+      # and each concurrent activity holds its own DuckDB connection with its
+      # own memory_limit. Concurrency multiplies the memory cap -- 4 x 1 GB
+      # (the ROOMY profile) against the 4 GB cgroup limit below. Raise one
+      # without the other and the kernel, not DuckDB, decides how the run ends.
+      MAX_CONCURRENT_ACTIVITIES: "4"
+      DUCKDB_THREADS: "4"
+      # Compute mounts /data read-only, so its spill directory cannot live
+      # there. Spill is ephemeral by definition -- the container filesystem is
+      # the right home for it, and keeping it off the writer's volume means a
+      # runaway LEAN query cannot fill the disk the warehouse is on.
+      DUCKDB_TEMP_DIR: /tmp/duck-tmp
+    command: ["python", "-m", "duckflow.worker", "compute"]
+    restart: unless-stopped
+    volumes:
+      # src is bind-mounted so `make restart` reloads code without a rebuild.
+      - ./src:/opt/duckflow/src:ro
+      - ./tests:/opt/duckflow/tests:ro
+      # Read-only: the CLI runs in this container and reads the warehouse, but
+      # nothing here may ever open it read-write. The mount makes that a
+      # filesystem fact rather than a convention.
+      - warehouse-data:/data:ro
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+
+  worker-writer:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    depends_on:
+      temporal:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *duck-env
+      # One slot. This is the line that honours DuckDB's single-writer rule.
+      MAX_CONCURRENT_ACTIVITIES: "1"
+      DUCKDB_THREADS: "2"
+    command: ["python", "-m", "duckflow.worker", "writer"]
+    # Durable execution is only durable if something restarts the process:
+    # Temporal resumes the workflow, it does not resurrect your container.
+    # `make demo-durability` stops this deliberately (stop, not kill, so the
+    # policy does not undo the demo) and brings it back.
+    restart: unless-stopped
+    volumes:
+      - ./src:/opt/duckflow/src:ro
+      - warehouse-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+volumes:
+  postgres-data:
+  minio-data:
+  warehouse-data:

@@ -1,0 +1,6 @@
+# Test tooling. `make test` installs it into the running worker container.
+-r requirements.txt
+pytest==8.4.2
+# anyio ships the pytest plugin that provides @pytest.mark.anyio, used by the
+# workflow tests. temporalio already depends on it; pinning keeps the two aligned.
+anyio==4.15.1
