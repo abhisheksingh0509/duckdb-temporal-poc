@@ -33,6 +33,11 @@ WORKDIR /opt/duckflow
 COPY src /opt/duckflow/src
 COPY tests /opt/duckflow/tests
 COPY pytest.ini /opt/duckflow/pytest.ini
+# The Markdown is not documentation-that-happens-to-ship: tests/test_docs.py
+# reads it and checks that LEARN.md and ASSIGNMENTS.md still agree about which
+# assignment drills which section. Leave it out and `make test` skips the only
+# check that keeps the two files honest.
+COPY README.md LEARN.md ASSIGNMENTS.md ROADMAP.md /opt/duckflow/
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "duckflow.worker", "compute"]

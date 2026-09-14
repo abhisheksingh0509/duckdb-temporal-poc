@@ -204,7 +204,7 @@ lake: ## List what the object store actually holds, by layer and dataset
 # ------------------------------------------------------------------- testing
 
 .PHONY: test
-test: ## Unit tests (no infrastructure needed beyond the container)
+test: ## 45 tests: catalog, warehouse, and doc cross-references
 	$(COMPOSE) exec -T worker-compute sh -c \
 	  "pip show pytest >/dev/null 2>&1 || pip install -q pytest==8.4.2 anyio==4.15.1"
 	$(COMPOSE) exec -T worker-compute python -m pytest /opt/duckflow/tests -q \

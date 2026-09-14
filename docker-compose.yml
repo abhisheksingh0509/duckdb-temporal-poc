@@ -138,6 +138,12 @@ services:
       # src is bind-mounted so `make restart` reloads code without a rebuild.
       - ./src:/opt/duckflow/src:ro
       - ./tests:/opt/duckflow/tests:ro
+      # ...and so are the docs, because tests/test_docs.py checks their
+      # cross-references and you want that feedback while editing them.
+      - ./README.md:/opt/duckflow/README.md:ro
+      - ./LEARN.md:/opt/duckflow/LEARN.md:ro
+      - ./ASSIGNMENTS.md:/opt/duckflow/ASSIGNMENTS.md:ro
+      - ./ROADMAP.md:/opt/duckflow/ROADMAP.md:ro
       # Read-only: the CLI runs in this container and reads the warehouse, but
       # nothing here may ever open it read-write. The mount makes that a
       # filesystem fact rather than a convention.
