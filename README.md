@@ -376,6 +376,67 @@ make test-workflow             # 7 orchestration tests on a throwaway Temporal
 UIs: Temporal <http://localhost:8234>, MinIO <http://localhost:9201>
 (minioadmin/minioadmin).
 
+### 7.1 Opening the warehouse in DBeaver (or any SQL client)
+
+There is no server, no port and no credentials. DuckDB is embedded, so a SQL
+client opens the **database file directly** — which means the client becomes one
+of the processes contending for the single write lock that §4 is about.
+
+**The safe way — a snapshot:**
+
+```bash
+make snapshot        # -> ./warehouse-snapshot.duckdb
+```
+
+Then in DBeaver: *Database → New Connection → DuckDB*, set **Path** to that
+file, *Test Connection* (it will offer to download the driver), *Finish*.
+
+Match the driver to the writer: `org.duckdb:duckdb_jdbc` **1.5.x**, to match the
+DuckDB 1.5.5 pinned in `requirements.txt`. Check it under *Edit Connection →
+Driver Properties → Driver version*. Older drivers do read these files — 1.3.1
+opens this database fine — but that is luck rather than a guarantee, and it
+stops being true the moment a feature bumps the storage version.
+
+**The live way, and the trap in it.** The warehouse lives in the
+`warehouse-data` Docker volume, so it is not on your host filesystem at all
+(on macOS and Windows it is inside the Docker VM). To see it live you have to
+bind-mount it:
+
+```yaml
+# docker-compose.yml, worker-writer
+volumes:
+  - ./data:/data              # instead of warehouse-data:/data
+```
+
+If you do that, **connect read-only**: *Edit Connection → Driver Properties →*
+add `duckdb.read_only` = `true`. DBeaver's default is read-write.
+
+That is not a tidiness rule. Measured on Docker Desktop for macOS:
+
+| holder | second opener | lock enforced? |
+|---|---|---|
+| host process | another host process | **yes** — refused |
+| host process (DBeaver) | container process (the writer) | **no** — it opened the file and wrote to it |
+
+DuckDB's file lock does not cross the bind-mount boundary between macOS and the
+Linux VM. So a read-write DBeaver connection and the writer worker will happily
+hold the same database at the same time, and the only thing standing between you
+and a corrupted file is that neither happened to write at the same moment.
+The lock is the entire mechanism protecting that file (§4), and a bind mount
+silently removes it.
+
+Hence `make snapshot` as the default: a copy cannot be corrupted by the pipeline
+and cannot corrupt it.
+
+**If you just want to poke at the data**, skip the GUI:
+
+```bash
+make query SQL="select * from gold.daily_region_consumption"   # read-only, in-container
+make gold                                                      # the curated view
+duckdb ./warehouse-snapshot.duckdb -ui                         # DuckDB's own browser UI
+```
+
+
 ---
 
 ## 8. Measured

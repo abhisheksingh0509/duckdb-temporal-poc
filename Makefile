@@ -197,6 +197,19 @@ warehouse: ## Row counts of every warehouse table
 query: ## Read-only SQL: make query SQL="select ..."
 	$(RUNI) query "$(SQL)"
 
+.PHONY: snapshot
+snapshot: ## Copy the warehouse to the host for DBeaver/DataGrip/duckdb CLI
+	@docker compose cp worker-writer:/data/warehouse.duckdb ./warehouse-snapshot.duckdb
+	@echo
+	@echo "wrote ./warehouse-snapshot.duckdb"
+	@echo
+	@echo "In DBeaver: New Connection -> DuckDB -> Path = $(PWD)/warehouse-snapshot.duckdb"
+	@echo "Driver must be org.duckdb:duckdb_jdbc 1.5.x to match the writer."
+	@echo
+	@echo "This is a COPY, on purpose. Pointing a SQL client at the live file"
+	@echo "read-write can corrupt it -- see README section 7.1."
+
+
 .PHONY: lake
 lake: ## List what the object store actually holds, by layer and dataset
 	$(RUNI) lake
